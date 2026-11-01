@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DroidVM Win11 ARM64 — DISM 離線部署用 unattend（首次開機跑 OOBE）。
+  只含 specialize + oobeSystem：驅動已離線注入、debloat 已離線做、testsigning 已在 BCD 設好，
+  所以這裡不需 windowsPE、不需匯入憑證、不需 pnputil。只負責建 USER + 自動登入。
+  注意：所有 component 的 processorArchitecture 必須是 arm64。
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <ComputerName>DROIDVM</ComputerName>
+    </component>
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <!-- 以 SYSTEM 把驅動簽章者憑證匯入機器 Root + TrustedPublisher，日後互動式更新驅動
+             不再跳「無法驗證發行者」。憑證由 build.ps1 第 5b 步從 .cat 萃取並 staging 到 certs\。 -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>cmd /c for %i in (C:\DroidVM\certs\*.cer) do certutil -addstore -f Root "%i"</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>cmd /c for %i in (C:\DroidVM\certs\*.cer) do certutil -addstore -f TrustedPublisher "%i"</Path>
+        </RunSynchronousCommand>
+        <!-- IPv6 介面識別碼用 EUI-64（從 MAC 推導）：Win10/11 預設是 RFC 7217 隨機 IID + RFC 4941
+             臨時位址，SLAAC 位址每台/每次都不同，沒法從 MAC 推地址。兩個都關掉：
+               randomizeidentifiers=disabled -> 穩定 IID 改回 EUI-64
+               privacy state=disabled        -> 不再產生 temporary 位址（否則對外連線會優先用它）
+             放在 specialize（比 FirstLogon 早很多）盡量趕在第一個 RA 之前；FirstLogon 還會再補一次
+             並重啟網卡，確保這次開機就拿到 EUI-64 位址。結尾 exit /b 0：specialize 的
+             RunSynchronousCommand 傳回非 0 會中止 Setup，不讓網路設定失敗連累裝機。 -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Path>cmd /c netsh interface ipv6 set global randomizeidentifiers=disabled &amp; netsh interface ipv6 set privacy state=disabled &amp; exit /b 0</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+        <SkipUserOOBE>true</SkipUserOOBE>
+      </OOBE>
+
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>@@USERNAME@@</Name>
+            <Group>Administrators</Group>
+            <DisplayName>@@USERNAME@@</DisplayName>
+            <Password><Value>@@PASSWORD@@</Value><PlainText>true</PlainText></Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+
+      <AutoLogon>
+        <Username>@@USERNAME@@</Username>
+        <Enabled>true</Enabled>
+        <LogonCount>999</LogonCount>
+        <Password><Value>@@PASSWORD@@</Value><PlainText>true</PlainText></Password>
+      </AutoLogon>
+
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order><Description>persistent autologon</Description>
+          <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 1 /f</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>2</Order><Description>persistent autologon user</Description>
+          <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUserName /t REG_SZ /d @@USERNAME@@ /f</CommandLine>
+        </SynchronousCommand>
+        <!-- 有密碼後，autologon 要能撐過 unattend AutoLogon 的 LogonCount 才需 DefaultPassword。
+             注意：這是「明文」存進登錄檔（Winlogon 的已知取捨）。不想要就刪掉這條，改吃 999 次上限。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>3</Order><Description>persistent autologon password</Description>
+          <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d "@@PASSWORD@@" /f</CommandLine>
+        </SynchronousCommand>
+        <!-- 裝 OpenSSH Server + 開 SSH/RDP 防火牆 + 佈署 authorized_keys（檔案由 build.ps1 8c staging）。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>4</Order><Description>setup OpenSSH + RDP firewall</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\setup-ssh.ps1</CommandLine>
+        </SynchronousCommand>
+        <!-- pvmpower 綁 root-enumerated ROOT\PVMPOWER：devnode 要在首次開機用 SetupAPI 建立（INF 注入
+             不會產生 devnode）。腳本由驅動 zip 根目錄提供；沒有就跳過（if exist 防呆）。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>5</Order><Description>pvmpower devnode</Description>
+          <CommandLine>cmd /c if exist C:\DroidVM\pvmpower-devnode.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\pvmpower-devnode.ps1</CommandLine>
+        </SynchronousCommand>
+        <!-- 電源：永不睡眠、永不關螢幕（AC+DC 都設 Never）。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>6</Order><Description>power: never sleep / never turn off display</Description>
+          <CommandLine>cmd /c powercfg /change standby-timeout-ac 0 &amp; powercfg /change standby-timeout-dc 0 &amp; powercfg /change monitor-timeout-ac 0 &amp; powercfg /change monitor-timeout-dc 0</CommandLine>
+        </SynchronousCommand>
+        <!-- 密碼永不過期：本機預設 MaxPasswordAge=42 天，到期後登入會被要求改密碼、
+             RDP/SSH 也會被擋。兩層都關掉：機器層的密碼原則（涵蓋日後新建的帳號）+ 帳號層的
+             PasswordNeverExpires 旗標（涵蓋這顆映像的 USER）。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>7</Order><Description>password policy: never expire</Description>
+          <CommandLine>cmd /c net accounts /maxpwage:unlimited</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>8</Order><Description>account flag: password never expires</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-LocalUser -Name '@@USERNAME@@' -PasswordNeverExpires $true"</CommandLine>
+        </SynchronousCommand>
+        <!-- 補設一次並重啟已連線的網卡：specialize 時若已收到 RA，隨機 IID 的位址會留著，
+             flap 一下讓 SLAAC 重跑，這次開機就是 EUI-64 位址（不用等下次重開機）。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>9</Order><Description>IPv6 SLAAC: EUI-64 interface identifier</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "netsh interface ipv6 set global randomizeidentifiers=disabled; netsh interface ipv6 set privacy state=disabled; Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | Restart-NetAdapter -Confirm:$false"</CommandLine>
+        </SynchronousCommand>
+        <!-- debloat 的首次登入半段（離線半段在 build.ps1 第 6 步）：關遙測 / 非必要服務 / 遙測排程 / Windows Update，
+             並把 enable_windows_update.bat 放到此帳號桌面（一次性）。必須排在 EMS-SAC 之前：它把 WU 關掉當基準，
+             setup-ems-sac.ps1 線上拉 FoD 時暫開，拉完照基準關回。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>10</Order><Description>debloat: telemetry / services / tasks / Windows Update off</Description>
+          <CommandLine>cmd /c if exist C:\DroidVM\debloat.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\debloat.ps1</CommandLine>
+        </SynchronousCommand>
+        <!-- EMS-SAC 工具集（互動式 SAC> 主控台的執行期）確保步驟。腳本會自我判斷：離線已注入就 no-op、
+             未武裝線上安裝就 no-op；只有 build.ps1 8d 放了 ems-sac-online.flag 時才以 SYSTEM 從 WU 拉取。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>11</Order><Description>ensure EMS-SAC toolset (FoD)</Description>
+          <CommandLine>cmd /c if exist C:\DroidVM\setup-ems-sac.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\setup-ems-sac.ps1</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+  </settings>
+</unattend>

@@ -1,0 +1,10 @@
+# 快取與雜項（各路線的中間產物：URL 下載 / zip 解壓，windows/files 與 macos/files 皆涵蓋）
+files/
+__pycache__/
+*.pyc
+
+# 使用者輸入與產物（大檔，不入庫）
+inputs/
+dist/
+*.qcow2
+*.vmpkg

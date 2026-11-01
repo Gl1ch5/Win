@@ -1,0 +1,220 @@
+name: Build Win11 ARM64 (Gunyah / DroidVM)
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: "Direct Win11 ARM64 ISO URL (optional; empty = fetch via Fido)"
+        required: false
+        default: ""
+      language:
+        description: "ISO language for Fido (e.g. 'English International', 'English', 'Russian')"
+        required: false
+        default: "English International"
+      release:
+        description: "Fido release (24H2 = build 26100)"
+        required: false
+        default: "24H2"
+      edition_name:
+        description: "Edition to apply from install.wim (matched by name)"
+        required: false
+        default: "Windows 11 Pro"
+      publish_release:
+        description: "Also publish a GitHub Release (split 7z parts)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  DRIVERS_URL: https://github.com/Droid-VM/gunyah-guest-drivers-windows/releases/download/dev/gunyah-arm64-drivers.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+          $paths = @(
+            'C:\hostedtoolcache\windows',
+            $env:ANDROID_HOME, $env:ANDROID_SDK_ROOT, 'C:\Android',
+            'C:\Program Files\dotnet\sdk',
+            'C:\Program Files (x86)\Android',
+            'C:\Program Files\Microsoft SQL Server',
+            'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions\Xamarin',
+            'C:\ghcup', 'C:\Strawberry', 'C:\rtools44', 'C:\mingw64', 'C:\msys64',
+            'C:\Program Files\LLVM', 'C:\Program Files\Haskell', 'C:\Julia',
+            'C:\Miniconda', 'C:\selenium', 'C:\tools\php'
+          ) | Where-Object { $_ -and (Test-Path $_) }
+          foreach ($p in $paths) {
+            Write-Host "removing $p"
+            # cmd rmdir is much faster than Remove-Item on huge trees
+            cmd /c "rmdir /s /q `"$p`"" 2>$null
+          }
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+          # Put the scratch area on whichever volume has the most room.
+          $best = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Free } | Sort-Object Free -Descending | Select-Object -First 1
+          $work = "$($best.Name):\dvm"
+          New-Item -ItemType Directory -Force "$work\tmp", "$work\iso", "$work\out" | Out-Null
+          Write-Host "work dir: $work ($([math]::Round($best.Free/1GB,1)) GB free)"
+          if ($best.Free -lt 45GB) { Write-Warning "less than 45 GB free on $($best.Name):" }
+          "DVM_WORK=$work" >> $env:GITHUB_ENV
+
+      - name: Install dependencies (QEMU, aria2, 7zip)
+        run: |
+          if (-not (Test-Path 'C:\Program Files\qemu\qemu-img.exe')) {
+            winget install --id SoftwareFreedomConservancy.QEMU -e --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
+            if (-not (Test-Path 'C:\Program Files\qemu\qemu-img.exe')) {
+              Write-Host "winget failed, falling back to choco"; choco install qemu -y --no-progress
+            }
+          }
+          choco install aria2 -y --no-progress
+          'C:\Program Files\qemu' >> $env:GITHUB_PATH
+          'C:\ProgramData\chocolatey\bin' >> $env:GITHUB_PATH
+          & 'C:\Program Files\qemu\qemu-img.exe' --version
+
+      - name: Fetch drivers & certificate
+        run: |
+          # windows\build.ps1 caches URL inputs under windows\files\ and extracts the zip next to it;
+          # DRIVER_DIR=ZIP/drivers and DRIVER_CERT=ZIP/DroidVM_Test.cer are resolved against that extracted root.
+          $files = Join-Path $PWD 'windows\files'
+          New-Item -ItemType Directory -Force $files | Out-Null
+          aria2c -x 16 -s 16 --allow-overwrite=true -d $files -o gunyah-arm64-drivers.zip $env:DRIVERS_URL
+          if ($LASTEXITCODE) { throw "driver download failed" }
+          $dst = Join-Path $files 'gunyah-arm64-drivers'
+          Expand-Archive (Join-Path $files 'gunyah-arm64-drivers.zip') -DestinationPath $dst -Force
+          Get-ChildItem $dst | Format-Table Name
+          foreach ($need in 'drivers', 'DroidVM_Test.cer') {
+            if (-not (Test-Path (Join-Path $dst $need))) { throw "missing ZIP/$need in driver zip" }
+          }
+          "DRIVERS_DIR=$(Join-Path $files 'gunyah-arm64-drivers.zip')" >> $env:GITHUB_ENV
+
+      - name: Download Windows 11 ARM64 ISO
+        env:
+          ISO_URL: ${{ inputs.iso_url }}
+          ISO_LANG: ${{ inputs.language }}
+          ISO_REL: ${{ inputs.release }}
+        run: |
+          $url = $env:ISO_URL
+          if (-not $url) {
+            Invoke-WebRequest https://raw.githubusercontent.com/pbatard/Fido/master/Fido.ps1 -OutFile "$env:RUNNER_TEMP\Fido.ps1"
+            foreach ($lang in @($env:ISO_LANG, 'English International', 'English') | Select-Object -Unique) {
+              for ($i = 1; $i -le 3 -and -not $url; $i++) {
+                Write-Host "Fido: Windows 11 $env:ISO_REL Arm64 '$lang' (attempt $i)"
+                $out = & "$env:RUNNER_TEMP\Fido.ps1" -Win 11 -Rel $env:ISO_REL -Ed Pro -Lang $lang -Arch Arm64 -GetUrl 2>&1
+                $url = ($out | Out-String) -split "\s+" | Where-Object { $_ -match '^https://.*\.iso' } | Select-Object -First 1
+                if (-not $url) { Write-Host ($out | Out-String); Start-Sleep 10 }
+              }
+              if ($url) { break }
+            }
+          }
+          if (-not $url) { throw "Could not obtain an ISO URL (Microsoft may block this runner IP). Re-run with the iso_url input." }
+          Write-Host "ISO URL: $($url -replace '\?.*$','?...')"
+          aria2c -x 16 -s 16 -k 64M --file-allocation=none --allow-overwrite=true `
+            --summary-interval=60 -d "$env:DVM_WORK\iso" -o win11-arm64.iso $url
+          if ($LASTEXITCODE) { throw "ISO download failed" }
+          $iso = "$env:DVM_WORK\iso\win11-arm64.iso"
+          Write-Host ("ISO size: {0:N2} GB" -f ((Get-Item $iso).Length / 1GB))
+          "SRC_ISO=$iso" >> $env:GITHUB_ENV
+
+      - name: Pick edition index
+        env:
+          EDITION: ${{ inputs.edition_name }}
+        run: |
+          $m = Mount-DiskImage -ImagePath $env:SRC_ISO -PassThru
+          try {
+            $l = ($m | Get-Volume).DriveLetter
+            $wim = "${l}:\sources\install.wim"
+            if (-not (Test-Path $wim)) { throw "ISO has no sources\install.wim (ESD-only ISO is not supported by the builder)" }
+            $imgs = Get-WindowsImage -ImagePath $wim
+            $imgs | Format-Table ImageIndex, ImageName
+            $pick = $imgs | Where-Object ImageName -eq $env:EDITION | Select-Object -First 1
+            if (-not $pick) { $pick = $imgs | Where-Object ImageName -match 'Pro' | Select-Object -First 1 }
+            if (-not $pick) { $pick = $imgs | Select-Object -First 1 }
+            Write-Host "using index $($pick.ImageIndex) = $($pick.ImageName)"
+            "IMAGE_INDEX=$($pick.ImageIndex)" >> $env:GITHUB_ENV
+          } finally { Dismount-DiskImage -ImagePath $env:SRC_ISO | Out-Null }
+
+      - name: Run builder (windows_build.ps1)
+        env:
+          QEMU_IMG_INSTALL: "1"
+          COMPRESS: "1"
+          OUT_VMPKG: "1"
+        run: |
+          $env:TEMP = "$env:DVM_WORK\tmp"; $env:TMP = $env:TEMP
+          $env:OUT_QCOW  = "$env:DVM_WORK\out\win11-droidvm.qcow2"
+          $env:OUT_VMPKG = "$env:DVM_WORK\out\win11-droidvm.vmpkg"
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\windows_build.ps1
+          if ($LASTEXITCODE) { throw "builder failed ($LASTEXITCODE)" }
+          Get-ChildItem "$env:DVM_WORK\out" | Format-Table Name, @{n='GB';e={[math]::Round($_.Length/1GB,2)}}
+          Remove-Item -Force $env:SRC_ISO -ErrorAction SilentlyContinue
+
+      - name: Upload artifact (.vmpkg)
+        uses: actions/upload-artifact@v4
+        id: art_vmpkg
+        with:
+          name: win11-droidvm-vmpkg
+          path: ${{ env.DVM_WORK }}\out\win11-droidvm.vmpkg
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload artifact (.qcow2)
+        uses: actions/upload-artifact@v4
+        id: art_qcow
+        with:
+          name: win11-droidvm-qcow2
+          path: ${{ env.DVM_WORK }}\out\win11-droidvm.qcow2
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Split for GitHub Release (2 GB asset limit)
+        if: ${{ inputs.publish_release }}
+        run: |
+          $rel = "$env:DVM_WORK\release"; New-Item -ItemType Directory -Force $rel | Out-Null
+          # remove qcow2 to make room; the vmpkg already contains it
+          Remove-Item -Force "$env:DVM_WORK\out\win11-droidvm.qcow2"
+          & 'C:\Program Files\7-Zip\7z.exe' a -v1900m -mx0 "$rel\win11-droidvm.vmpkg.7z" "$env:DVM_WORK\out\win11-droidvm.vmpkg"
+          if ($LASTEXITCODE) { throw "7z failed" }
+          Get-FileHash -Algorithm SHA256 "$env:DVM_WORK\out\win11-droidvm.vmpkg" |
+            ForEach-Object { "$($_.Hash.ToLower())  win11-droidvm.vmpkg" } | Set-Content "$rel\SHA256SUMS.txt"
+          Get-ChildItem $rel | Format-Table Name, Length
+          "RELEASE_TAG=win11-droidvm-${{ github.run_number }}" >> $env:GITHUB_ENV
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Win11 ARM64 DroidVM build ${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          body: |
+            Windows 11 ARM64 image for Qualcomm Gunyah / DroidVM (crosvm), built by run ${{ github.run_id }}.
+            qcow2 clusters are zstd-compressed; vms.json: 3072 MB RAM, 256 MB swiotlb.
+            Download all `win11-droidvm.vmpkg.7z.*` parts and extract the `.001` file (7-Zip / ZArchiver) to get `win11-droidvm.vmpkg`.
+            Default login: USER / DroidVM.
+          files: ${{ env.DVM_WORK }}\release\*
+
+      - name: Summary
+        if: always()
+        run: |
+          $repo = "${{ github.server_url }}/${{ github.repository }}"
+          $s = @("## Win11 ARM64 DroidVM image", "")
+          if ('${{ steps.art_vmpkg.outputs.artifact-url }}') { $s += "- Artifact (.vmpkg, needs GitHub login): ${{ steps.art_vmpkg.outputs.artifact-url }}" }
+          if ('${{ steps.art_qcow.outputs.artifact-url }}')  { $s += "- Artifact (.qcow2, needs GitHub login): ${{ steps.art_qcow.outputs.artifact-url }}" }
+          if ($env:RELEASE_TAG -and (Test-Path "$env:DVM_WORK\release")) {
+            $s += "", "### Release: $repo/releases/tag/$env:RELEASE_TAG", ""
+            Get-ChildItem "$env:DVM_WORK\release" | ForEach-Object {
+              $s += "- $repo/releases/download/$env:RELEASE_TAG/$($_.Name)"
+            }
+          }
+          $s -join "`n" >> $env:GITHUB_STEP_SUMMARY

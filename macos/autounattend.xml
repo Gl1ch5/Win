@@ -1,0 +1,269 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DroidVM Win11 ARM64 LTSC IoT 無人值守安裝設定
+  - 安裝 install.wim index 2 (Windows 11 IoT Enterprise LTSC)
+  - GPT/UEFI 自動分割（EFI 260MB + MSR 16MB + Windows 其餘）
+  - 略過 TPM/SecureBoot/RAM/CPU 檢查
+  - 建立本機帳號 USER（無密碼），自動登入
+  - 首次登入：匯入測試憑證、開 testsigning/nointegritychecks、裝其餘驅動、輕量化
+  注意：所有 component 的 processorArchitecture 必須是 arm64
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+
+  <!-- ============ windowsPE：分割 + 選版 + 略過硬體檢查 ============ -->
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <SetupUILanguage><UILanguage>en-US</UILanguage></SetupUILanguage>
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Setup" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+
+      <!-- 略過 Win11 硬體檢查（TPM / SecureBoot / RAM / CPU / 儲存）-->
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>reg add HKLM\System\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>reg add HKLM\System\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>reg add HKLM\System\Setup\LabConfig /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Path>reg add HKLM\System\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Path>reg add HKLM\System\Setup\LabConfig /v BypassStorageCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <!-- 目標 BCD 的 testsigning 不在這裡設（windowsPE RunSynchronous 跑在套用映像「之前」，
+             此時 ESP/BCD 還不存在，bcdedit 會失敗並中止 Setup）。改成事先 patch install.wim 裡的
+             BCD-Template（bcdboot 建 BCD 的範本），第一次開機就自帶 testsigning。見 02 腳本。 -->
+      </RunSynchronous>
+
+      <DiskConfiguration>
+        <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add">
+              <Order>1</Order><Type>EFI</Type><Size>260</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>2</Order><Type>MSR</Type><Size>16</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order><Type>Primary</Type><Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order><PartitionID>1</PartitionID>
+              <Format>FAT32</Format><Label>System</Label>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order><PartitionID>3</PartitionID>
+              <Format>NTFS</Format><Label>Windows</Label><Letter>C</Letter>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/INDEX</Key>
+              <Value>@@IMAGE_INDEX@@</Value>  <!-- 由 build.sh 偵測/選定後注入 -->
+            </MetaData>
+          </InstallFrom>
+          <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
+        </OSImage>
+      </ImageInstall>
+
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <ProductKey><Key></Key></ProductKey>
+      </UserData>
+    </component>
+  </settings>
+
+  <!-- ============ specialize ============ -->
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <ComputerName>DROIDVM</ComputerName>
+    </component>
+    <!-- 關閉首次開機的 OOBE 隱私/網路阻擋 -->
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <!-- 在 specialize（以 SYSTEM 權限）把「從驅動 .cat 萃取的所有簽章者憑證」匯入機器的
+             Root + TrustedPublisher，FirstLogon 裝驅動時發行者已受信任 -> 不跳「無法驗證發行者」。
+             用迴圈匯入整個 certs\ 資料夾：不同驅動可能用不同（同名不同金鑰）測試憑證，全部涵蓋。 -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>cmd /c for %i in (C:\DroidVM\certs\*.cer) do certutil -addstore -f Root "%i"</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>cmd /c for %i in (C:\DroidVM\certs\*.cer) do certutil -addstore -f TrustedPublisher "%i"</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+
+  <!-- ============ oobeSystem：建立 USER、自動登入、首次登入命令 ============ -->
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+        <SkipUserOOBE>true</SkipUserOOBE>
+      </OOBE>
+
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>@@USERNAME@@</Name>
+            <Group>Administrators</Group>
+            <DisplayName>@@USERNAME@@</DisplayName>
+            <Password><Value>@@PASSWORD@@</Value><PlainText>true</PlainText></Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+
+      <!-- 自動登入（一次即可進桌面；下面 FirstLogon 會把它設成永久）-->
+      <AutoLogon>
+        <Username>@@USERNAME@@</Username>
+        <Enabled>true</Enabled>
+        <LogonCount>999</LogonCount>
+        <Password><Value>@@PASSWORD@@</Value><PlainText>true</PlainText></Password>
+      </AutoLogon>
+
+      <FirstLogonCommands>
+        <!-- 憑證已在 specialize 匯入（SYSTEM 權限）-->
+        <SynchronousCommand wcm:action="add">
+          <Order>3</Order><Description>testsigning on</Description>
+          <CommandLine>cmd /c bcdedit /set "{default}" testsigning on</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>4</Order><Description>nointegritychecks on</Description>
+          <CommandLine>cmd /c bcdedit /set "{default}" nointegritychecks on</CommandLine>
+        </SynchronousCommand>
+        <!-- 安裝其餘驅動（viostor/vioscsi 已由 $WinpeDriver$ 注入）；所有簽章者憑證已於 specialize
+             匯入 Root+TrustedPublisher，正常零提示。若仍有殘留提示，03 的自動點擊器為後備。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>5</Order><Description>install all DroidVM drivers</Description>
+          <CommandLine>cmd /c for /d %i in (C:\DroidVM\drivers\*) do pnputil /add-driver "%i\*.inf" /install /subdirs</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>6</Order><Description>persistent autologon for USER</Description>
+          <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 1 /f</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>7</Order><Description>persistent autologon user</Description>
+          <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUserName /t REG_SZ /d @@USERNAME@@ /f</CommandLine>
+        </SynchronousCommand>
+        <!-- 有密碼後，autologon 要撐過 AutoLogon 的 LogonCount 才需 DefaultPassword（明文存登錄檔的已知取捨）-->
+        <SynchronousCommand wcm:action="add">
+          <Order>8</Order><Description>persistent autologon password</Description>
+          <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d "@@PASSWORD@@" /f</CommandLine>
+        </SynchronousCommand>
+        <!-- 裝 OpenSSH Server + 佈署 authorized_keys（檔案由 02-make-iso.sh staging 到 C:\DroidVM）。沒 installer 就略過。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>9</Order><Description>setup OpenSSH</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\setup-ssh.ps1</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>10</Order><Description>debloat</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\debloat.ps1</CommandLine>
+        </SynchronousCommand>
+        <!-- 密碼永不過期：本機預設 MaxPasswordAge=42 天，到期後登入會被要求改密碼、RDP/SSH 也會被擋。
+             兩層都關：機器層密碼原則（涵蓋日後新建帳號）+ 帳號層 PasswordNeverExpires 旗標（涵蓋 USER）。
+             設在 generalize 之前，讓成品映像自帶；目標端 gunyah-oobe.xml 會再冪等重設一次。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>11</Order><Description>password policy: never expire</Description>
+          <CommandLine>cmd /c net accounts /maxpwage:unlimited</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>12</Order><Description>account flag: password never expires</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-LocalUser -Name '@@USERNAME@@' -PasswordNeverExpires $true"</CommandLine>
+        </SynchronousCommand>
+        <!-- 收尾：sysprep /generalize 把映像打回「OOBE-pending、無 baked 裝置樹」的可部署狀態，位元語意等同 route A（DISM）產物。
+             為何非做不可：上面 pnputil 是在「沒有 ACPI\RDMA0000 的 qemu VM」裡裝驅動，做出的映像已 specialize 成 qemu 硬體
+             （baked 了上千個 Enum 裝置實例、OOBE 已完成）。這種映像搬到 Gunyah 是「第二次開機」，只把 cache 內的 boot device
+             set 拉起來；新出現的 ACPI\RDMA0000 被當新裝置延後安裝 -> rdmapool 來不及、viostor 退回 lent 直接 DMA -> crosvm 中止。
+             generalize 清掉那些 qemu 專屬 device 實例 + OOBE 狀態，但「保留」DriverStore 驅動、boot-start service、debloat、
+             OpenSSH、憑證、testsigning BCD、USER 帳號。於是 Gunyah 第一次開機 = 全新硬體偵測，會在 boot 階段就把 rdmapool 綁到
+             真的 ACPI\RDMA0000（早於 viostor），跟能開機的 DISM 產物走同一條路。/unattend 指到極簡的目標端 unattend
+             （gunyah-oobe.xml：靜默 OOBE + autologon + 重建 pvmpower devnode，其餘都靠上面已 baked 的成果）。
+             /shutdown -> qemu 乾淨退出 = qcow2 成品就緒。失敗會停在此步（不 fallback 關機，以免誤出未 generalize 的壞映像）；
+             如卡住檢查 C:\Windows\System32\Sysprep\Panther\setuperr.log（常見為 appx 驗證，debloat 已用 provisioned+AllUsers 併移緩解）。 -->
+        <!-- EMS/SAC：把成品的 ESP BCD 設成序列 out-of-band 主控台。ARM64 無 legacy I/O COM，EMS 要從 ACPI
+             SPCR 讀埠/鮑率（edk2 由 SBSA UART 的 FDT 節點生 SPCR）→ 用 emssettings BIOS，不是 EMSPORT:n。
+             這裡只武裝 loader/kernel；互動式 SAC 執行期（sacdrv.sys/sacsess.exe/sacsvr）是另一個 FoD，
+             由目標端 gunyah-oobe.xml 的 setup-ems-sac.ps1 於首開機安裝。設在 generalize 前 → 成品自帶。
+             SAC 要真的接上，VM 啟動時要有一個 SBSA 序列埠設為 guest 主控台（crosvm stdout-path→SPCR）。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>13</Order><Description>EMS: emssettings BIOS (SPCR)</Description>
+          <CommandLine>cmd /c bcdedit /emssettings BIOS</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>14</Order><Description>EMS: ems on (OS loader)</Description>
+          <CommandLine>cmd /c bcdedit /ems "{default}" on</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>15</Order><Description>EMS: bootems on (boot manager)</Description>
+          <CommandLine>cmd /c bcdedit /bootems "{bootmgr}" on</CommandLine>
+        </SynchronousCommand>
+        <!-- EMS-SAC 執行期 FoD：在「構建期」的 qemu 建置 VM 內下載並烙進映像（qemu -netdev user 有 NAT 上網）。
+             -NoReboot：不重開機，成品以 InstallPending 出貨，目標端首次開機從本機元件庫套用、不需連網。
+             設在 debloat（含 WU 停用 + ResetBase）之後，避免 ResetBase 動到剛落地的 FoD；腳本會臨時開回 WU。
+             僅在 02-make-iso.sh 放了 ems-sac-online.flag（EMS_SAC_SOURCE=online）時才實際安裝，否則 no-op。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>16</Order><Description>build-time: bake EMS-SAC FoD (no reboot)</Description>
+          <CommandLine>cmd /c if exist C:\DroidVM\setup-ems-sac.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\setup-ems-sac.ps1 -NoReboot</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>17</Order><Description>sysprep generalize (defer hardware detect to Gunyah)</Description>
+          <CommandLine>cmd /c %WINDIR%\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:C:\DroidVM\gunyah-oobe.xml</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+  </settings>
+</unattend>
