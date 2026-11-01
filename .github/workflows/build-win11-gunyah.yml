@@ -42,33 +42,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Free disk space
+      - name: Pick work drive
         run: |
+          # No cleanup needed: D: on windows-latest has ~145 GB free, C: only ~30 GB.
           Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
-          $paths = @(
-            'C:\hostedtoolcache\windows',
-            $env:ANDROID_HOME, $env:ANDROID_SDK_ROOT, 'C:\Android',
-            'C:\Program Files\dotnet\sdk',
-            'C:\Program Files (x86)\Android',
-            'C:\Program Files\Microsoft SQL Server',
-            'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions\Xamarin',
-            'C:\ghcup', 'C:\Strawberry', 'C:\rtools44', 'C:\mingw64', 'C:\msys64',
-            'C:\Program Files\LLVM', 'C:\Program Files\Haskell', 'C:\Julia',
-            'C:\Miniconda', 'C:\selenium', 'C:\tools\php'
-          ) | Where-Object { $_ -and (Test-Path $_) }
-          # native rmdir, all trees in parallel
-          $procs = foreach ($p in $paths) {
-            Write-Host "removing $p"
-            Start-Process cmd -ArgumentList "/c rmdir /s /q `"$p`"" -NoNewWindow -PassThru
-          }
-          $procs | Wait-Process -Timeout 900 -ErrorAction SilentlyContinue
-          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
-          # Put the scratch area on whichever volume has the most room.
           $best = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Free } | Sort-Object Free -Descending | Select-Object -First 1
           $work = "$($best.Name):\dvm"
           New-Item -ItemType Directory -Force "$work\tmp", "$work\iso", "$work\out" | Out-Null
           Write-Host "work dir: $work ($([math]::Round($best.Free/1GB,1)) GB free)"
-          if ($best.Free -lt 45GB) { Write-Warning "less than 45 GB free on $($best.Name):" }
+          if ($best.Free -lt 45GB) { throw "less than 45 GB free on $($best.Name):" }
           "DVM_WORK=$work" >> $env:GITHUB_ENV
 
       - name: Install dependencies (QEMU, aria2, 7zip)
@@ -175,16 +157,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload artifact (.qcow2)
-        uses: actions/upload-artifact@v4
-        id: art_qcow
-        with:
-          name: win11-droidvm-qcow2
-          path: ${{ env.DVM_WORK }}\out\win11-droidvm.qcow2
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Upload to Google Drive (rclone)
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
@@ -206,8 +178,6 @@ jobs:
         if: ${{ github.event_name == 'push' || inputs.publish_release }}
         run: |
           $rel = "$env:DVM_WORK\release"; New-Item -ItemType Directory -Force $rel | Out-Null
-          # remove qcow2 to make room; the vmpkg already contains it
-          Remove-Item -Force "$env:DVM_WORK\out\win11-droidvm.qcow2"
           & 'C:\Program Files\7-Zip\7z.exe' a -v1900m -mx0 "$rel\win11-droidvm.vmpkg.7z" "$env:DVM_WORK\out\win11-droidvm.vmpkg"
           if ($LASTEXITCODE) { throw "7z failed" }
           Get-FileHash -Algorithm SHA256 "$env:DVM_WORK\out\win11-droidvm.vmpkg" |
@@ -235,7 +205,6 @@ jobs:
           $repo = "${{ github.server_url }}/${{ github.repository }}"
           $s = @("## Win11 ARM64 DroidVM image", "")
           if ('${{ steps.art_vmpkg.outputs.artifact-url }}') { $s += "- Artifact (.vmpkg, needs GitHub login): ${{ steps.art_vmpkg.outputs.artifact-url }}" }
-          if ('${{ steps.art_qcow.outputs.artifact-url }}')  { $s += "- Artifact (.qcow2, needs GitHub login): ${{ steps.art_qcow.outputs.artifact-url }}" }
           if ($env:GDRIVE_PATH) { $s += "- Google Drive: $env:GDRIVE_PATH $env:GDRIVE_LINK" }
           if ($env:RELEASE_TAG -and (Test-Path "$env:DVM_WORK\release")) {
             $s += "", "### Release: $repo/releases/tag/$env:RELEASE_TAG", ""
