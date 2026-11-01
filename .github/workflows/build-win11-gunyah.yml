@@ -186,7 +186,7 @@ jobs:
           retention-days: 30
 
       - name: Split for GitHub Release (2 GB asset limit)
-        if: ${{ inputs.publish_release != false }}
+        if: ${{ github.event_name == 'push' || inputs.publish_release }}
         run: |
           $rel = "$env:DVM_WORK\release"; New-Item -ItemType Directory -Force $rel | Out-Null
           # remove qcow2 to make room; the vmpkg already contains it
@@ -199,7 +199,7 @@ jobs:
           "RELEASE_TAG=win11-droidvm-${{ github.run_number }}" >> $env:GITHUB_ENV
 
       - name: Publish GitHub Release
-        if: ${{ inputs.publish_release != false }}
+        if: ${{ github.event_name == 'push' || inputs.publish_release }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
