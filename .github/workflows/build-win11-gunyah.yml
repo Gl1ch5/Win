@@ -14,9 +14,9 @@ on:
         required: false
         default: "English International"
       release:
-        description: "Fido release (24H2 = build 26100)"
+        description: "Fido release (Latest, or e.g. 26H2). Microsoft only serves the newest release"
         required: false
-        default: "24H2"
+        default: "Latest"
       edition_name:
         description: "Edition to apply from install.wim (matched by name)"
         required: false
@@ -56,11 +56,12 @@ jobs:
             'C:\Program Files\LLVM', 'C:\Program Files\Haskell', 'C:\Julia',
             'C:\Miniconda', 'C:\selenium', 'C:\tools\php'
           ) | Where-Object { $_ -and (Test-Path $_) }
-          foreach ($p in $paths) {
+          # native rmdir, all trees in parallel
+          $procs = foreach ($p in $paths) {
             Write-Host "removing $p"
-            # cmd rmdir is much faster than Remove-Item on huge trees
-            cmd /c "rmdir /s /q `"$p`"" 2>$null
+            Start-Process cmd -ArgumentList "/c rmdir /s /q `"$p`"" -NoNewWindow -PassThru
           }
+          $procs | Wait-Process -Timeout 900 -ErrorAction SilentlyContinue
           Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
           # Put the scratch area on whichever volume has the most room.
           $best = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Free } | Sort-Object Free -Descending | Select-Object -First 1
@@ -103,15 +104,20 @@ jobs:
         env:
           ISO_URL: ${{ inputs.iso_url }}
           ISO_LANG: ${{ inputs.language || 'English International' }}
-          ISO_REL: ${{ inputs.release || '24H2' }}
+          ISO_REL: ${{ inputs.release || 'Latest' }}
         run: |
           $url = $env:ISO_URL
           if (-not $url) {
             Invoke-WebRequest https://raw.githubusercontent.com/pbatard/Fido/master/Fido.ps1 -OutFile "$env:RUNNER_TEMP\Fido.ps1"
-            foreach ($lang in @($env:ISO_LANG, 'English International', 'English') | Select-Object -Unique) {
+            $rels = @($env:ISO_REL, 'Latest') | Select-Object -Unique
+            $langs = @($env:ISO_LANG, 'English International', 'English') | Select-Object -Unique
+            $combos = foreach ($r in $rels) { foreach ($l in $langs) { ,@($r, $l) } }
+            foreach ($combo in $combos) {
+              $rel, $lang = $combo
               for ($i = 1; $i -le 3 -and -not $url; $i++) {
-                Write-Host "Fido: Windows 11 $env:ISO_REL Arm64 '$lang' (attempt $i)"
-                $out = & "$env:RUNNER_TEMP\Fido.ps1" -Win 11 -Rel $env:ISO_REL -Ed Pro -Lang $lang -Arch Arm64 -GetUrl 2>&1
+                Write-Host "Fido: Windows 11 $rel Arm64 '$lang' (attempt $i)"
+                $out = & "$env:RUNNER_TEMP\Fido.ps1" -Win 11 -Rel $rel -Ed Pro -Lang $lang -Arch Arm64 -GetUrl 2>&1
+                if (($out | Out-String) -match 'Invalid Windows release') { break }
                 $url = ($out | Out-String) -split "\s+" | Where-Object { $_ -match '^https://.*\.iso' } | Select-Object -First 1
                 if (-not $url) { Write-Host ($out | Out-String); Start-Sleep 10 }
               }
