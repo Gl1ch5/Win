@@ -15,7 +15,7 @@
   "prepare_lend_mthp": "chunked",
   "gunyah_dynamic_share": false,
 
-  "usb": true,
+  "usb": false,
   "balloon": false,
   "rng": true,
 
