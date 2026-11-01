@@ -154,7 +154,7 @@ jobs:
       - name: Run builder (windows_build.ps1)
         env:
           QEMU_IMG_INSTALL: "1"
-          COMPRESS: "1"
+          COMPRESS: "0"   # this DroidVM build cannot read zstd-compressed qcow2; vmpkg is zstd-compressed instead
           OUT_VMPKG: "1"
         run: |
           $env:TEMP = "$env:DVM_WORK\tmp"; $env:TMP = $env:TEMP
@@ -207,7 +207,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           body: |
             Windows 11 ARM64 image for Qualcomm Gunyah / DroidVM (crosvm), built by run ${{ github.run_id }}.
-            qcow2 clusters are zstd-compressed; vms.json: 3072 MB RAM, 256 MB swiotlb.
+            qcow2 is uncompressed (vmpkg is zstd); vms.json: 3072 MB RAM, 256 MB swiotlb.
             Download all `win11-droidvm.vmpkg.7z.*` parts and extract the `.001` file (7-Zip / ZArchiver) to get `win11-droidvm.vmpkg`.
             Default login: USER / DroidVM.
           files: ${{ env.DVM_WORK }}\release\*
