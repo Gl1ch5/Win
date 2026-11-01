@@ -185,6 +185,23 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Upload to Google Drive (rclone)
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          if (-not $env:RCLONE_CONF) { Write-Host "secret RCLONE_CONF not set - skipping Google Drive upload"; exit 0 }
+          choco install rclone -y --no-progress
+          $cfg = "$env:RUNNER_TEMP\rclone.conf"
+          $env:RCLONE_CONF | Set-Content -Encoding ascii $cfg
+          $remote = (rclone --config $cfg listremotes | Select-Object -First 1)
+          if (-not $remote) { throw "no remote found in RCLONE_CONF" }
+          $dest = "${remote}DroidVM/build-${{ github.run_number }}"
+          rclone --config $cfg copy "$env:DVM_WORK\out\win11-droidvm.vmpkg" $dest --drive-chunk-size 256M --transfers 1 --stats 60s --stats-one-line -v
+          if ($LASTEXITCODE) { throw "rclone upload failed" }
+          $link = rclone --config $cfg link "$dest/win11-droidvm.vmpkg" 2>$null
+          "GDRIVE_LINK=$link" >> $env:GITHUB_ENV
+          "GDRIVE_PATH=$dest" >> $env:GITHUB_ENV
+
       - name: Split for GitHub Release (2 GB asset limit)
         if: ${{ github.event_name == 'push' || inputs.publish_release }}
         run: |
@@ -219,6 +236,7 @@ jobs:
           $s = @("## Win11 ARM64 DroidVM image", "")
           if ('${{ steps.art_vmpkg.outputs.artifact-url }}') { $s += "- Artifact (.vmpkg, needs GitHub login): ${{ steps.art_vmpkg.outputs.artifact-url }}" }
           if ('${{ steps.art_qcow.outputs.artifact-url }}')  { $s += "- Artifact (.qcow2, needs GitHub login): ${{ steps.art_qcow.outputs.artifact-url }}" }
+          if ($env:GDRIVE_PATH) { $s += "- Google Drive: $env:GDRIVE_PATH $env:GDRIVE_LINK" }
           if ($env:RELEASE_TAG -and (Test-Path "$env:DVM_WORK\release")) {
             $s += "", "### Release: $repo/releases/tag/$env:RELEASE_TAG", ""
             Get-ChildItem "$env:DVM_WORK\release" | ForEach-Object {
