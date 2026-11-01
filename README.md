@@ -1,119 +1,141 @@
 # win11-arm64-image-builder
 
-把 **Win11 ARM64 ISO + 自簽 gunyah/virtio 驅動**全自動建成一顆可直接在 **DroidVM（Gunyah/crosvm）上開機的 qcow2**。
+Полностью автоматическая сборка **ISO Win11 ARM64 + самоподписанные драйверы gunyah/virtio** в **qcow2, который сразу загружается в DroidVM (Gunyah/crosvm)**.
 
-產物預設:本機帳號 `USER`(自動登入、密碼永不過期)、testsigning + nointegritychecks 已開、驅動已裝、SSH/RDP 已開、已 debloat(含關閉 Windows Update,桌面有 `enable_windows_update.bat` 可開回)、永不睡眠 / 永不關螢幕、停用 Reserved Storage、IPv6 SLAAC 用 EUI-64(位址可由 MAC 推算)。
+Что получается по умолчанию: локальная учётная запись `USER` (автовход, пароль без срока действия), включены testsigning + nointegritychecks, драйверы установлены, SSH/RDP включены, система очищена от лишнего (debloat, в том числе отключён Windows Update — вернуть его можно через `enable_windows_update.bat` на рабочем столе), сон и отключение экрана выключены, Reserved Storage отключено, IPv6 SLAAC использует EUI-64 (адрес можно вычислить по MAC).
 
-## 兩條路線(二選一,產物等價)
+## Сборка в GitHub Actions (этот форк)
 
-| 路線 | 環境 | 入口 | 做法 | 時間 |
+Workflow `.github/workflows/build-win11-gunyah.yml` собирает образ по маршруту A на `windows-latest`:
+
+1. Освобождает место на диске (нужно 45+ ГБ).
+2. Ставит QEMU (winget) и aria2 (choco).
+3. Скачивает драйверы и сертификат в `windows/files/` (`ZIP/drivers`, `ZIP/DroidVM_Test.cer`).
+4. Получает ссылку на ISO Win11 24H2 ARM64 через Fido и качает его `aria2c -x16 -s16`. Можно передать свою ссылку в параметре `iso_url`.
+5. Запускает `windows_build.ps1` с `QEMU_IMG_INSTALL=1`, `COMPRESS=1`, `OUT_VMPKG=1`.
+6. Выкладывает `.vmpkg` и `.qcow2` как артефакты, а также GitHub Release с частями `win11-droidvm.vmpkg.7z.001…` по 1900 МБ. Прямые ссылки появляются в сводке запуска.
+
+Запуск: **Actions → Build Win11 ARM64 (Gunyah / DroidVM) → Run workflow**.
+Сначала включите Actions: **Settings → Actions → General → Allow all actions**, а в **Workflow permissions** выберите **Read and write**.
+
+На телефоне скачайте все части `.7z.*` и распакуйте `.001` (ZArchiver / 7-Zip) — получится `win11-droidvm.vmpkg`, который импортируется в DroidVM.
+
+> В этом форке `vms.json` по умолчанию использует **3072 МБ RAM** (при 4096 МБ на ядрах Gunyah со страницами 4K бывает чёрный экран) и **256 МБ swiotlb**.
+
+## Два маршрута (выбирается один, результат одинаковый)
+
+| Маршрут | Среда | Точка входа | Как работает | Время |
 |---|---|---|---|---|
-| **A. Windows** | 單台 x64 Windows(系統管理員) | `windows_build.ps1` | DISM 離線套用映像 + 離線注入驅動 + bcdboot/bcdedit;不跑 Setup、不開 VM | ~5–10 分 |
-| **B. macOS** | 單台 Apple Silicon Mac | `macos_build.sh` | qemu HVF 跑 Setup 裝機 + 裝驅動,再 `sysprep /generalize` 打回可部署狀態 | ~30 分 |
+| **A. Windows** | x64 Windows (администратор) | `windows_build.ps1` | DISM офлайн применяет образ + офлайн внедряет драйверы + bcdboot/bcdedit; Setup и VM не запускаются | ~5–10 мин |
+| **B. macOS** | Mac на Apple Silicon | `macos_build.sh` | qemu HVF запускает Setup, ставит систему и драйверы, затем `sysprep /generalize` возвращает её в состояние для развёртывания | ~30 мин |
 
-兩條路線都把映像做成 **OOBE-pending(尚未完成首次設定)**:真正的「第一次開機」發生在 **Gunyah 目標機**上,由它全新偵測硬體並安裝驅動 —— 尤其把 `rdmapool` 綁到目標機才有的 `ACPI\RDMA0000`(受保護 VM 的 restricted-DMA pool),讓 `viostor` 的 DMA 走 bounce、不打到 lent 記憶體。這是驅動能在開機階段正確載入的關鍵。
+Оба маршрута делают образ в состоянии **OOBE-pending** (первоначальная настройка не пройдена). Настоящая «первая загрузка» происходит на **целевой машине Gunyah**: она заново определяет оборудование и ставит драйверы. Главное — `rdmapool` привязывается к `ACPI\RDMA0000`, который есть только на целевой машине (restricted-DMA pool защищённой VM). Поэтому DMA у `viostor` идёт через bounce-буфер и не попадает в lent-память. Именно это позволяет драйверам правильно загрузиться при старте.
 
-> **產物功能等價,但體積不同**:路線 B(macOS)約 **7 GB**,路線 A(Windows)約 **14 GB**。差在回收可用空間的方式 —— macOS 流程在 qemu 執行期即時 TRIM(`discard=unmap`)並線上 debloat,壓得較實;想更小可走 macOS。開 `COMPRESS=1`(qcow2 **zstd** 壓縮叢集)後路線 A 實測 **4.7 GB**;新版 crosvm 可直讀 zstd 叢集,匯入後不必解壓即可開機(zlib 的 `-c` crosvm 讀不了,builder 不再產出)。
+> **Функционально результат одинаковый, размер разный:** маршрут B (macOS) — около **7 ГБ**, маршрут A (Windows) — около **14 ГБ**. Причина в том, как освобождается место: macOS делает TRIM прямо во время работы qemu (`discard=unmap`) и debloat онлайн. С `COMPRESS=1` (кластеры qcow2 сжимаются **zstd**) маршрут A даёт **4,7 ГБ**. Новый crosvm читает zstd-кластеры напрямую, распаковывать после импорта не нужно (zlib `-c` crosvm не читает, поэтому сборщик его больше не делает).
 
-## 用法
+## Использование
 
-兩邊都是「改入口腳本頂部的變數 → 執行」。
+В обоих случаях: поменяйте переменные в начале скрипта входа и запустите.
 
 ```powershell
-# 路線 A(Windows,會自動提權)
+# Маршрут A (Windows, права администратора запрашиваются автоматически)
 powershell -ExecutionPolicy Bypass -File windows_build.ps1
 ```
 ```bash
-# 路線 B(macOS)
+# Маршрут B (macOS)
 bash macos_build.sh
 ```
 
-## 設定(入口腳本裡的變數)
+В этом форке переменные в `windows_build.ps1` — только значения по умолчанию: если переменная окружения уже задана, используется она.
 
-檔案類變數(`SRC_ISO` / `DRIVERS_DIR` / `OPENSSH_SRC`)可填 **URL**(自動下載到 `files/`)或**本地路徑**;zip 自動解壓。
+## Настройки (переменные в скрипте входа)
 
-| 變數 | 說明 |
+Файловые переменные (`SRC_ISO` / `DRIVERS_DIR` / `OPENSSH_SRC`) принимают **URL** (файл скачивается в `files/`) или **локальный путь**; zip распаковывается автоматически.
+
+| Переменная | Описание |
 |---|---|
-| `SRC_ISO` | **必填**。Win11 ARM64 ISO(URL 或路徑) |
-| `DRIVERS_DIR` | 驅動來源:GitHub release zip URL / 本地 zip / 本地資料夾。預設抓 `gunyah-guest-drivers-windows` 的 `dev` release |
-| `DRIVER_INSTALL` | 只安裝這些驅動子資料夾(預設 `NetKVM rdmapool pvmpower vioinput viostor vioscsi`;必須含開機碟 `viostor`) |
-| `DRIVER_CERT` | 簽章憑證(空 = 從驅動 `.cat` 自動萃取) |
-| `IMAGE_INDEX` | install.wim 版本索引(空 = 列出讓你選) |
-| `USERNAME` / `PASSWORD` | 建立的本機管理員帳號。macOS 用 `USERNAME` / `PASSWORD`;Windows 用 `$env:DVM_USERNAME` / `$env:DVM_PASSWORD` |
-| `SSH_PUBKEY` | SSH 公鑰(空 = 只密碼登入) |
-| `OUT_QCOW` | 輸出 qcow2 路徑 |
-| `EMS_SAC_SOURCE` | 互動式 `SAC>` 執行期 FoD 從哪來:**`skip`**(預設,只出 boot-EMS)/ **`online`**(路線 A 於**目標端首次開機**連網裝;路線 B 於**構建期** qemu VM 內連網裝並烙入,目標端免連網)/ **`E:\`**(ARM64 FoD ISO 掛載點/資料夾,**僅路線 A**,離線 `dism /Add-Capability` 烙進映像、全程零連網)。見下方 EMS/SAC |
+| `SRC_ISO` | **Обязательно.** ISO Win11 ARM64 (URL или путь) |
+| `DRIVERS_DIR` | Источник драйверов: zip из GitHub release / локальный zip / папка. По умолчанию — release `dev` из `gunyah-guest-drivers-windows` |
+| `DRIVER_INSTALL` | Ставить только эти подпапки драйверов (по умолчанию `NetKVM rdmapool pvmpower vioinput viostor vioscsi`; `viostor` для загрузочного диска обязателен) |
+| `DRIVER_CERT` | Сертификат подписи (пусто — извлекается из `.cat` драйвера) |
+| `IMAGE_INDEX` | Индекс редакции в install.wim (пусто — показать список и спросить) |
+| `USERNAME` / `PASSWORD` | Локальный администратор. На macOS — `USERNAME` / `PASSWORD`, на Windows — `$env:DVM_USERNAME` / `$env:DVM_PASSWORD` |
+| `SSH_PUBKEY` | Публичный ключ SSH (пусто — вход только по паролю) |
+| `OUT_QCOW` | Путь к выходному qcow2 |
+| `OUT_VMPKG` | Путь к выходному `.vmpkg` (`1` — имя по умолчанию) |
+| `COMPRESS` | `1` — сжимать кластеры qcow2 zstd |
+| `EMS_SAC_SOURCE` | Откуда брать FoD для интерактивного `SAC>`: **`skip`** (по умолчанию, только boot-EMS) / **`online`** (маршрут A ставит при **первой загрузке на целевой машине** из сети; маршрут B ставит **во время сборки** внутри qemu и вшивает в образ) / **`E:\`** (точка монтирования или папка ISO с ARM64 FoD, **только маршрут A**: офлайн `dism /Add-Capability`, без сети) |
 
-## EMS / SAC(序列 out-of-band 主控台,`SAC>`)
+## EMS / SAC (последовательная консоль, `SAC>`)
 
-讓成品開機即可用 **Emergency Management Services**:在 app 的 SBSA 序列埠上得到 Windows `SAC>` 互動主控台。**BCD EMS 一律自動烙入**(`emssettings BIOS` + `ems on` + `bootems on`),所以開機序列文字永遠有;差別只在**互動式 `SAC>` 執行期**(`Windows.Desktop.EMS-SAC.Tools` FoD,LTSC/Pro ARM64 不內含)怎麼來:
+Позволяет сразу после загрузки получить **Emergency Management Services**: интерактивную консоль Windows `SAC>` на порту SBSA в приложении. **BCD EMS всегда вшивается** (`emssettings BIOS` + `ems on` + `bootems on`), поэтому текст загрузки в порт выводится всегда. Различается только **интерактивный `SAC>`** (FoD `Windows.Desktop.EMS-SAC.Tools`, которого нет в LTSC/Pro ARM64):
 
-| | 路線 A(Windows) | 路線 B(macOS) |
+| | Маршрут A (Windows) | Маршрут B (macOS) |
 |---|---|---|
-| **離線 FoD**(零連網,推薦) | `EMS_SAC_SOURCE=E:\` → 離線 DISM 烙入 | 無(建置主機非 Windows,無法離線 DISM;給路徑會直接報錯) |
-| **線上 FoD** | `EMS_SAC_SOURCE=online` → **目標端首次開機**連網裝 + 自動重開一次 | `EMS_SAC_SOURCE=online` → **構建期** qemu VM 連網下載並烙入 → 目標端**免連網**、首開機從本機套用 |
-| `EMS_SAC_SOURCE=skip`(預設) | 只出 boot-EMS,無互動 `SAC>` | 同左 |
+| **Офлайн FoD** (без сети, рекомендуется) | `EMS_SAC_SOURCE=E:\` → офлайн DISM | Нет (хост не Windows; путь вызовет ошибку) |
+| **Онлайн FoD** | `EMS_SAC_SOURCE=online` → ставится при первой загрузке на целевой машине + одна перезагрузка | `EMS_SAC_SOURCE=online` → скачивается во время сборки, на целевой машине сеть не нужна |
+| `skip` (по умолчанию) | Только boot-EMS | То же |
 
-沒連網**不會卡死**:安裝腳本 try/catch 略過,boot-EMS 照常,只是少了互動 `SAC>`。
+Без сети ничего **не зависает**: скрипт пропускает установку, boot-EMS работает, просто не будет интерактивного `SAC>`.
 
-### VM 要有一個 SBSA 埠設為 guest 主控台(SAC 才會綁上)
+### В VM нужен порт SBSA, назначенный консолью гостя
 
-SAC 走 ACPI SPCR,SPCR 由 edk2 依 crosvm 傳入的 SBSA UART FDT 節點生成,而該節點要被指定為 guest console 才會被 SPCR 指到。兩種取得方式:
+SAC работает через ACPI SPCR, который edk2 строит по узлу FDT SBSA UART от crosvm; узел должен быть назначен консолью гостя.
 
-- **開箱即用 → 用 vmpkg**:builder 直接輸出**帶 config 的 `.vmpkg`**(本地 `vms.json` 維護,預設 **4 GB RAM + 256 MB swiotlb**,simplefb 60 Hz),其 `serial_ports` 已含 `{"hardware":"sbsa","num":1,"backend":"app_console","console":true}`(COM2-4 為 sink)。app 匯入整包即帶好設定,免手動、免 import→export 往返。
-- **裸 qcow2 → 使用者兩步**:app 裡 **外設 → 序列埠 → 新增 SBSA**,再點該埠的 **「作為 Guest 控制台(SPCR)」** radio。
+- **Из коробки — vmpkg**: сборщик выдаёт `.vmpkg` с конфигом (`vms.json`), где `serial_ports` уже содержит `{"hardware":"sbsa","num":1,"backend":"app_console","console":true}` (COM2–4 — sink).
+- **Голый qcow2** — два шага в приложении: **Периферия → Последовательные порты → Добавить SBSA**, затем отметить **«Консоль гостя (SPCR)»**.
 
-> **daemon 實際發出的 crosvm 旗標**(SBSA 埠設 app-console + console 時,供對照):
-> ```
-> --serial type=file,hardware=sbsa,num=1,earlycon,console,path=/proc/self/fd/N,input=/proc/self/fd/M
-> ```
-> 後端選 pty 則為 `type=pty,hardware=sbsa,num=1,console,earlycon[,path=symlink]`;sink 埠照發 `type=sink,hardware=serial,num=2..4`。`console`/`earlycon` 只掛在被選為 console 的那一個埠上。
+Флаг crosvm, который выдаёт daemon:
+```
+--serial type=file,hardware=sbsa,num=1,earlycon,console,path=/proc/self/fd/N,input=/proc/self/fd/M
+```
 
-並需**新版 crosvm**:含 SBSA UART `@0x6000` + PmReset `@0x5000`(後者補上 Windows-on-ARM 無 PSCI 的關機/重啟,對齊 edk2 FADT)。
+Нужен **новый crosvm** с SBSA UART `@0x6000` и PmReset `@0x5000` (последний даёт выключение и перезагрузку Windows-on-ARM без PSCI).
 
-## vmpkg 直接輸出(免 app import→export 往返)
+## Прямой вывод vmpkg
 
-設 `OUT_VMPKG` 就會在 qcow2 之外**再吐一顆可直接匯入的 `.vmpkg`**,把 VM 設定(RAM / swiotlb / SBSA 主控台 / boot)一起烙進封裝 —— app 匯入即帶好設定,開箱即用、免手動、免每次跑 app 的 import→export。
+Если задан `OUT_VMPKG`, вместе с qcow2 создаётся **`.vmpkg` для прямого импорта** с вшитыми настройками VM (RAM / swiotlb / консоль SBSA / boot).
 
-- **設定來源 = 本地 `vms.json`**(repo 根目錄,本地維護一份)。改它即可調 RAM / CPU / swiotlb / 序列埠等;packager 會自動把 qcow2 補成頂層 disk 條目。預設已放 `memory_mb=4096`、`swiotlb_mb=256`、`screens`(simplefb 1280×720 `poll_hz=60`;gpu-0 關、`refresh_rate=60`)、`serial_ports` 含 SBSA 主控台(SAC)+ COM sink、UEFI boot。顯示用的是 app 新版的 `screens` 排版;舊版 `display_*` 開關仍留著給沒有 `screens` 的舊 app 讀,但**不放** `display_width/height`(新 app 看到會把 simplefb 的 `poll_hz` 折回 30)。
-- **打包器**:兩份等價實作,容器 byte-exact 對齊 app 的 `PackageHeader`/`VMExportTask`(壓縮(GNU-tar)),壓縮都吃滿全部核心:
-  - Windows 路線用 **`pack-vmpkg.ps1`**——純 PowerShell + 內建 `tar.exe`(Win10 1803+),**零額外相依,不需要 Python**。預設 `-Compression auto`:`tar.exe` 帶 libzstd(Win11)就用 **zstd 多執行緒**(`-Threads`,預設全核;app 自家匯出也是 zstd),否則退回 gzip(bsdtar 的 gzip 只有單執行緒):
+- **Источник настроек — `vms.json`** в корне репозитория. В нём меняются RAM / CPU / swiotlb / порты и т. д.; упаковщик сам добавит qcow2 как диск.
+- **Упаковщики** (формат байт-в-байт совпадает с экспортом приложения):
+  - Windows: **`pack-vmpkg.ps1`** — чистый PowerShell + встроенный `tar.exe`, Python не нужен. `-Compression auto`: zstd в несколько потоков, если `tar.exe` поддерживает libzstd (Win11), иначе gzip.
     ```powershell
     .\pack-vmpkg.ps1 -Qcow2 out.qcow2 -Config vms.json -Out win11.vmpkg   # [-Compression auto|zstd|gzip|none] [-Threads N]
     ```
-  - macOS 路線用 **`pack-vmpkg.py`**(純 Python 3 stdlib,macOS 內建 python3)。gzip 是 pigz 式多執行緒(`--threads`,預設全核),輸出仍是單一標準 gzip member,app 端照常讀:
+  - macOS: **`pack-vmpkg.py`** (Python 3, только стандартная библиотека), многопоточный gzip.
     ```bash
     python3 pack-vmpkg.py --qcow2 out.qcow2 --config vms.json --out win11.vmpkg   # [--threads N]
     ```
-  - 入口變數:`VMPKG_COMPRESSION`(Windows 預設 `auto`、macOS 預設 `gzip`;`COMPRESS=1` 時兩者預設改為 `none`,見下)、`VMPKG_THREADS`(0 = 全核)。
-- **網路**:`vms.json` 的 `networks[]` 每個 NIC 帶 `pkg_network_ref`,並可內嵌 `pkg_network`(app 的 NetworkConfig,schema 2)。打包器把定義搬到 manifest 頂層 `networks[]` 並標上同一個 ref,即 app 匯出的形狀。匯入時「existing」模式依 **name** 對應到裝置上既有的網路(預設模板指向 `br-wifi`),「auto」模式會照定義**新建**一個(name / bridge 撞名會加尾碼)。
-- **單一檔 ≥ 8 GiB**(未壓縮的 qcow2 就會):GNU tar 用 base-256 記大小,app 的 `TarReader` 讀成 0 → 匯入得到 **0 B 磁碟**。打包器改寫成 12 位八進位(app 自己的 `TarWriter` 就是這樣寫,GNU tar / bsdtar / Python 也讀得懂):Python 版任何壓縮都適用;PowerShell 版只有 `-Compression none` 能改(壓縮串流裡改不到),其他情況印警告。根本解法是 app 端 `TarReader.parseOctal` 補 base-256。
-- **qcow2 壓縮 × vmpkg 壓縮怎麼搭**(路線 A 同一顆映像實測;qcow2 zstd 需新版 crosvm 直讀):
+  - Переменные: `VMPKG_COMPRESSION` (Windows — `auto`, macOS — `gzip`; при `COMPRESS=1` по умолчанию `none`), `VMPKG_THREADS` (0 — все ядра).
+- **Сеть**: каждая NIC в `networks[]` имеет `pkg_network_ref` и может содержать `pkg_network` (NetworkConfig, schema 2). При импорте режим «existing» ищет сеть по имени (шаблон указывает на `br-wifi`), а «auto» создаёт новую.
+- **Файл ≥ 8 ГиБ**: GNU tar пишет размер в base-256, `TarReader` приложения читает его как 0, и диск после импорта получается 0 Б. Упаковщик пишет 12-значное восьмеричное число; в PowerShell-версии это возможно только при `-Compression none`.
+- **Как сочетать сжатие qcow2 и vmpkg** (замеры на маршруте A):
 
-  | | qcow2 | vmpkg | 匯入後裝置上的 qcow2 |
+  | | qcow2 | vmpkg | qcow2 на устройстве |
   |---|---|---|---|
-  | `COMPRESS` 關 + vmpkg zstd(預設) | 9.78 GiB | **4.18 GiB** | 9.78 GiB;叢集未壓縮,讀寫無額外成本 |
-  | `COMPRESS=1` + vmpkg none | 4.70 GiB | 4.70 GiB | 4.70 GiB;每次讀要解壓叢集,寫入會 COW 成未壓縮叢集、檔案隨使用變大 |
-  | `COMPRESS=1` + vmpkg zstd | 4.70 GiB | 4.62 GiB | 同上 |
+  | `COMPRESS` выкл. + vmpkg zstd | 9,78 ГиБ | **4,18 ГиБ** | 9,78 ГиБ, без накладных расходов |
+  | `COMPRESS=1` + vmpkg none | 4,70 ГиБ | 4,70 ГиБ | 4,70 ГиБ; чтение с распаковкой, запись делает несжатые кластеры, файл растёт |
+  | `COMPRESS=1` + vmpkg zstd | 4,70 ГиБ | 4,62 ГиБ | То же |
 
-  要**下載最小**就維持預設(不壓 qcow2、vmpkg zstd);要的是**裝置上省空間**才開 `COMPRESS=1`,此時 vmpkg 再壓只省 1.7%,所以 `VMPKG_COMPRESSION` 未指定(Windows `auto`)時自動改用 `none`,匯入即單純複製。
+  Чтобы **скачивать меньше** — не сжимайте qcow2 (vmpkg zstd). Чтобы **экономить место на устройстве** — `COMPRESS=1`.
 
-> 相容性:`serial_ports` 是 app 新欄位。新版 app 讀它(自動帶上 SBSA 主控台);舊版 app 匯入會忽略它、靠 ensureDefaults 補 COM 四顆(只是少了 SBSA,不會壞)。
+> Совместимость: `serial_ports` — новое поле. Старые версии приложения его игнорируют и добавляют четыре COM-порта (просто без SBSA).
 
-## 需求
+## Требования
 
-- **macOS:** `brew install qemu wimlib xorriso colima docker`;另需約 **50 GB** 可用空間放中間產物(工作 qcow2 / 安裝 ISO / 驅動,位於 `macos/files`)。testsigning 的 BCD patch 用 Colima 容器內的 hivex 代跑,故無需另一台 Linux
-- **Windows:** x64 Windows(系統管理員)、內建 `dism` / `bcdboot` / `diskpart`、`qemu-img`(QEMU for Windows;沒裝的話 build 會問要不要 `winget install SoftwareFreedomConservancy.QEMU`,設 `QEMU_IMG_INSTALL=1` 免問直接裝。winget 上另一個 `cloudbase.qemu-img` 是 2.3.0,寫不了 zstd,別用)
+- **macOS:** `brew install qemu wimlib xorriso colima docker`; около **50 ГБ** свободного места (`macos/files`). Патч BCD для testsigning делается hivex внутри контейнера Colima.
+- **Windows:** x64 Windows (администратор), встроенные `dism` / `bcdboot` / `diskpart`, `qemu-img` (QEMU for Windows; если его нет, сборщик предложит `winget install SoftwareFreedomConservancy.QEMU`, с `QEMU_IMG_INSTALL=1` — без вопроса. Пакет `cloudbase.qemu-img` версии 2.3.0 zstd не умеет — не используйте).
 
-## 結構
+## Структура
 
 ```
-macos_build.sh      路線 B 入口(改變數後 bash 執行)
-windows_build.ps1   路線 A 入口(改變數後以系統管理員執行)
-macos/              路線 B 實作:build.sh + 00/02/03 階段 + autounattend / gunyah-oobe + Colima BCD patch
-windows/            路線 A 實作:build.ps1 + unattend(詳見 windows/README.md)
-pack-vmpkg.py       qcow2 + vms.json → .vmpkg 打包器(純 stdlib,多執行緒 gzip;macOS 路線 OUT_VMPKG 用,也可獨立執行)
-pack-vmpkg.ps1      同上的 Windows 版(純 PowerShell + 內建 tar.exe,zstd 多執行緒;Windows 路線 OUT_VMPKG 用)
-vms.json            出廠 VM 設定模板(RAM/swiotlb/序列埠/boot);本地維護,打包時烙入 vmpkg
-files/              各路線的中間產物快取(URL 下載 / zip 解壓,已 gitignore)
+.github/workflows/  сборка в GitHub Actions (маршрут A)
+macos_build.sh      вход маршрута B
+windows_build.ps1   вход маршрута A
+macos/              реализация маршрута B
+windows/            реализация маршрута A: build.ps1 + unattend (см. windows/README.md)
+pack-vmpkg.py       упаковщик qcow2 + vms.json → .vmpkg (macOS)
+pack-vmpkg.ps1      то же для Windows
+vms.json            шаблон настроек VM (RAM/swiotlb/порты/boot)
+files/              кэш промежуточных файлов (в .gitignore)
 ```
